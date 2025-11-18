@@ -330,3 +330,375 @@ def generate_release_plan(days: int = 7) -> Tuple[List[Dict[str, str]], List[str
         schedule.append({"day": day_name, "task": task})
         reminders.append(f"Reminder for {day_name}: {task}")
     return schedule, reminders
+
+
+# music/utils.py - ADD THESE NEW FUNCTIONS
+
+import os
+import requests
+from typing import Dict, Any
+import google.generativeai as genai
+
+genai.configure(api_key=os.getenv("GENAI_API_KEY"))
+
+# ============================================================
+# AI Image Generation for Social Posts
+# ============================================================
+
+def generate_social_post_with_image(
+    user,
+    song,
+    custom_prompt: str = "",
+    platform: str = "instagram"
+) -> Dict[str, Any]:
+    """
+    Generate social media post with AI-generated image
+    
+    Args:
+        user: Authenticated user
+        song: Song object
+        custom_prompt: Custom prompt from user (e.g., "Make it more energetic")
+        platform: Target platform (instagram, tiktok, facebook)
+    
+    Returns:
+        Dict with caption, hashtags, image_url, default_prompt
+    """
+    profile = getattr(user, "artist_profile", None)
+    stage_name = profile.stage_name if profile and getattr(profile, "stage_name", None) else getattr(user, "username", "Unknown")
+    genre = profile.primary_genre if profile and getattr(profile, "primary_genre", None) else "Hip-hop/Rap"
+
+    # Generate caption and hashtags
+    caption_prompt = (
+        f"Create a viral {platform} caption for this song:\n\n"
+        f"Artist: {stage_name}\n"
+        f"Song: {song.title}\n"
+        f"Genre: {genre}\n"
+        f"Lyrics snippet: {song.transcription[:200] if song.transcription else 'Instrumental'}\n\n"
+    )
+    
+    if custom_prompt:
+        caption_prompt += f"Artist's request: {custom_prompt}\n\n"
+    
+    caption_prompt += (
+        f"Create:\n"
+        f"1. A catchy caption (2-3 lines, emojis included)\n"
+        f"2. 10 trending hashtags\n\n"
+        f"Make it authentic, engaging, and platform-appropriate for {platform}."
+    )
+    
+    caption_response = _call_gemini(caption_prompt)
+    
+    # Parse response (simple split by lines)
+    lines = caption_response.split('\n')
+    caption = '\n'.join(lines[:3]) if len(lines) >= 3 else caption_response[:280]
+    hashtags = ' '.join([line for line in lines if line.strip().startswith('#')])
+    
+    if not hashtags:
+        hashtags = f"#{genre.replace(' ', '')} #NewMusic #{stage_name.replace(' ', '')} #Viral #MusicPromotion"
+
+    # Generate image using AI (multiple options)
+    image_url = generate_ai_image_for_post(
+        song_title=song.title,
+        artist_name=stage_name,
+        genre=genre,
+        custom_prompt=custom_prompt,
+        platform=platform
+    )
+
+    return {
+        "caption": caption.strip(),
+        "hashtags": hashtags.strip(),
+        "image_url": image_url,
+        "default_prompt": f"Promotional post for {song.title} by {stage_name}",
+    }
+
+
+def generate_ai_image_for_post(
+    song_title: str,
+    artist_name: str,
+    genre: str,
+    custom_prompt: str = "",
+    platform: str = "instagram"
+) -> str:
+    """
+    Generate AI image using multiple services
+    Priority: Imagen 3 > DALL-E > Stability AI > Placeholder
+    
+    Returns:
+        Image URL (string)
+    """
+    
+    # Build image generation prompt
+    base_prompt = (
+        f"Create a professional music promotional image for {platform}. "
+        f"Song: '{song_title}' by {artist_name}. "
+        f"Genre: {genre}. "
+        f"Style: Modern, vibrant, eye-catching, album cover aesthetic. "
+        f"Include bold typography with song title. "
+        f"High quality, 1080x1080 for Instagram. "
+    )
+    
+    if custom_prompt:
+        base_prompt += f"Additional style: {custom_prompt}. "
+    
+    base_prompt += "No faces, abstract art preferred."
+
+    # Method 1: Try Google Imagen 3 (requires Vertex AI setup)
+    try:
+        image_url = generate_with_google_imagen(base_prompt)
+        if image_url:
+            return image_url
+    except Exception as e:
+        print(f"Imagen 3 failed: {e}")
+
+    # Method 2: Try DALL-E (requires OpenAI API key)
+    try:
+        image_url = generate_with_dalle(base_prompt)
+        if image_url:
+            return image_url
+    except Exception as e:
+        print(f"DALL-E failed: {e}")
+
+    # Method 3: Try Stability AI (requires API key)
+    try:
+        image_url = generate_with_stability_ai(base_prompt)
+        if image_url:
+            return image_url
+    except Exception as e:
+        print(f"Stability AI failed: {e}")
+
+    # Fallback: Return placeholder or use a template
+    return generate_placeholder_image(song_title, artist_name, genre)
+
+
+# ============================================================
+# Image Generation Methods
+# ============================================================
+
+def generate_with_google_imagen(prompt: str) -> str:
+    """
+    Generate image using Google Imagen 3 (Vertex AI)
+    Requires: google-cloud-aiplatform library and project setup
+    """
+    try:
+        from google.cloud import aiplatform
+        from vertexai.preview.vision_models import ImageGenerationModel
+        
+        # Initialize Vertex AI
+        aiplatform.init(
+            project=os.getenv("GOOGLE_CLOUD_PROJECT"),
+            location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+        )
+        
+        model = ImageGenerationModel.from_pretrained("imagen-3.0-generate-001")
+        
+        images = model.generate_images(
+            prompt=prompt,
+            number_of_images=1,
+            aspect_ratio="1:1",  # Square for Instagram
+        )
+        
+        if images and len(images) > 0:
+            # Upload to cloud storage and return URL
+            # For now, return base64 or local path
+            return images[0].url if hasattr(images[0], 'url') else ""
+    except Exception as e:
+        print(f"Imagen error: {e}")
+        return ""
+
+
+def generate_with_dalle(prompt: str) -> str:
+    """
+    Generate image using OpenAI DALL-E
+    Requires: openai library and API key
+    """
+    try:
+        import openai
+        openai.api_key = os.getenv("OPENAI_API_KEY")
+        
+        response = openai.Image.create(
+            prompt=prompt,
+            n=1,
+            size="1024x1024"
+        )
+        
+        return response['data'][0]['url']
+    except Exception as e:
+        print(f"DALL-E error: {e}")
+        return ""
+
+
+def generate_with_stability_ai(prompt: str) -> str:
+    """
+    Generate image using Stability AI (Stable Diffusion)
+    Requires: Stability AI API key
+    """
+    try:
+        api_key = os.getenv("STABILITY_API_KEY")
+        if not api_key:
+            return ""
+        
+        url = "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image"
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        body = {
+            "text_prompts": [{"text": prompt}],
+            "cfg_scale": 7,
+            "height": 1024,
+            "width": 1024,
+            "samples": 1,
+            "steps": 30,
+        }
+        
+        response = requests.post(url, headers=headers, json=body)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Save image and return URL
+            # For now return base64 or placeholder
+            return data.get('artifacts', [{}])[0].get('url', '')
+    except Exception as e:
+        print(f"Stability AI error: {e}")
+        return ""
+
+
+def generate_placeholder_image(song_title: str, artist_name: str, genre: str) -> str:
+    """
+    Generate placeholder image URL using a service like Placeholder.com or UI Avatars
+    """
+    # Option 1: Use placeholder.com with custom text
+    text = f"{song_title}+by+{artist_name}".replace(' ', '+')
+    return f"https://via.placeholder.com/1080x1080/6366F1/FFFFFF?text={text}"
+    
+    # Option 2: Use DiceBear for avatar-style images
+    # return f"https://api.dicebear.com/7.x/shapes/svg?seed={song_title}&size=1080"
+    
+    # Option 3: Use Unsplash for music-related stock photos
+    # return f"https://source.unsplash.com/1080x1080/?music,{genre}"
+
+
+# ============================================================
+# Alternative: Local Image Generation with PIL (No API needed)
+# ============================================================
+
+def generate_local_promotional_image(song_title: str, artist_name: str, genre: str) -> str:
+    """
+    Generate a simple promotional image locally using PIL
+    No external API required - good for MVP/testing
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        import io
+        import base64
+        from django.core.files.base import ContentFile
+        
+        # Create image
+        width, height = 1080, 1080
+        
+        # Gradient background colors based on genre
+        genre_colors = {
+            "HipHop": [(99, 102, 241), (139, 92, 246)],  # Blue to Purple
+            "Pop": [(236, 72, 153), (251, 146, 60)],      # Pink to Orange
+            "R&B": [(59, 130, 246), (147, 51, 234)],      # Blue to Purple
+            "Afrobeat": [(234, 179, 8), (239, 68, 68)],   # Yellow to Red
+            "Default": [(99, 102, 241), (139, 92, 246)]
+        }
+        
+        colors = genre_colors.get(genre, genre_colors["Default"])
+        
+        # Create gradient
+        img = Image.new('RGB', (width, height))
+        draw = ImageDraw.Draw(img)
+        
+        for y in range(height):
+            r = int(colors[0][0] + (colors[1][0] - colors[0][0]) * y / height)
+            g = int(colors[0][1] + (colors[1][1] - colors[0][1]) * y / height)
+            b = int(colors[0][2] + (colors[1][2] - colors[0][2]) * y / height)
+            draw.rectangle([(0, y), (width, y+1)], fill=(r, g, b))
+        
+        # Add text
+        try:
+            # Try to use a nice font
+            font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 80)
+            font_medium = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 50)
+            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 40)
+        except:
+            # Fallback to default font
+            font_large = ImageFont.load_default()
+            font_medium = ImageFont.load_default()
+            font_small = ImageFont.load_default()
+        
+        # Draw song title
+        title_bbox = draw.textbbox((0, 0), song_title, font=font_large)
+        title_width = title_bbox[2] - title_bbox[0]
+        title_x = (width - title_width) / 2
+        draw.text((title_x, 400), song_title, fill='white', font=font_large)
+        
+        # Draw artist name
+        artist_bbox = draw.textbbox((0, 0), artist_name, font=font_medium)
+        artist_width = artist_bbox[2] - artist_bbox[0]
+        artist_x = (width - artist_width) / 2
+        draw.text((artist_x, 520), artist_name, fill='white', font=font_medium)
+        
+        # Draw genre
+        genre_bbox = draw.textbbox((0, 0), genre.upper(), font=font_small)
+        genre_width = genre_bbox[2] - genre_bbox[0]
+        genre_x = (width - genre_width) / 2
+        draw.text((genre_x, 620), genre.upper(), fill='rgba(255,255,255,0.8)', font=font_small)
+        
+        # Save to bytes
+        buffer = io.BytesIO()
+        img.save(buffer, format='PNG')
+        buffer.seek(0)
+        
+        # Save to Django media storage
+        from django.core.files.storage import default_storage
+        filename = f"social_posts/{song_title}_{artist_name}.png".replace(' ', '_')
+        path = default_storage.save(filename, ContentFile(buffer.read()))
+        
+        # Return media URL
+        from django.conf import settings
+        return f"{settings.MEDIA_URL}{path}"
+        
+    except Exception as e:
+        print(f"Local image generation error: {e}")
+        return generate_placeholder_image(song_title, artist_name, genre)
+
+
+# ============================================================
+# Example usage in generate_social_post_with_image
+# ============================================================
+# Update the function to use local generation as fallback:
+
+def generate_ai_image_for_post_v2(
+    song_title: str,
+    artist_name: str,
+    genre: str,
+    custom_prompt: str = "",
+    platform: str = "instagram"
+) -> str:
+    """
+    Enhanced version with local fallback
+    """
+    # Try cloud AI services first
+    base_prompt = (
+        f"Professional music promotional image for {platform}. "
+        f"Song: '{song_title}' by {artist_name}. Genre: {genre}. "
+        f"Modern, vibrant, eye-catching style. 1080x1080. {custom_prompt}"
+    )
+    
+    # Try external APIs
+    for generator in [generate_with_google_imagen, generate_with_dalle, generate_with_stability_ai]:
+        try:
+            url = generator(base_prompt)
+            if url:
+                return url
+        except Exception:
+            continue
+    
+    # Fallback to local generation
+    return generate_local_promotional_image(song_title, artist_name, genre)

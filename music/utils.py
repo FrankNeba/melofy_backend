@@ -14,7 +14,7 @@ import google.generativeai as genai
 genai.configure(api_key=os.getenv("GENAI_API_KEY"))
 
 try:
-    whisper_model = whisper.load_model("base")
+    whisper_model = whisper.load_model("tiny")
 except Exception as e:
     print("Warning: could not load whisper model:", e)
     whisper_model = None
